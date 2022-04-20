@@ -1,0 +1,13 @@
+{
+"type": "FeatureCollection",
+"features": [
+{ "type": "Feature", "properties": { "Name": "Churchill" }, "geometry": { "type": "Point", "coordinates": [ -94.17, 58.77 ] } },
+{ "type": "Feature", "properties": { "Name": "Arviat" }, "geometry": { "type": "Point", "coordinates": [ -94.06, 61.1 ] } },
+{ "type": "Feature", "properties": { "Name": "Quaqtaq" }, "geometry": { "type": "Point", "coordinates": [ -69.64, 61.04 ] } },
+{ "type": "Feature", "properties": { "Name": "Inukjuak" }, "geometry": { "type": "Point", "coordinates": [ -78.5, 58.45 ] } },
+{ "type": "Feature", "properties": { "Name": "Kuujjuarapik" }, "geometry": { "type": "Point", "coordinates": [ -78.0, 55.26 ] } },
+{ "type": "Feature", "properties": { "Name": "Igloolik" }, "geometry": { "type": "Point", "coordinates": [ -81.82, 69.37 ] } },
+{ "type": "Feature", "properties": { "Name": "Center" }, "geometry": { "type": "Point", "coordinates": [ -83.0, 58.6 ] } },
+{ "type": "Feature", "properties": { "Name": "Ungava" }, "geometry": { "type": "Point", "coordinates": [ -67.0, 58.6 ] } }
+]
+}
