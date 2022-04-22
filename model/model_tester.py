@@ -143,7 +143,13 @@ class ModelTester:
                         gap=0,
                         predict_only_sic=True,
                         predict_anomalies=True):
+        """
+        Creates the training and test datasets and stores them as class attributes.
+        :param: ds: xarray DataSet containing input & output variables, with SIC being the first variable
+                    (TODO: make this position agnostic)
+        """
         
+        # Save the input parameters, other than self and the dataset (hacky)
         self.data_params = locals()
         del self.data_params['self']
         del self.data_params['ds']
@@ -151,53 +157,53 @@ class ModelTester:
         self.num_timesteps = num_timesteps
         self.binary_sic = binary_sic
         self.predict_anomalies = predict_anomalies
-
+        
         if weekly:
             ds = ds.resample(time='W').mean()
 
         # Split by time into train & test
         train, test = split_time(ds, test_size)
 
-        # Include only winter, if desired
+        # Include only winter
         if only_winter:
             train = train.sel(time=is_winter(train['time.month']))
             test = test.sel(time=is_winter(test['time.month']))
-
+        
+        # Crop to the extent of the polynya
         if only_polynya:
-            # Using slightly larger area
-            # train = train.isel(x=slice(30, 54), y=slice(2, 22))
-            # test = test.isel(x=slice(30, 54), y=slice(2, 22))
-            # train = train.isel(x=slice(30, None), y=slice(None, 22))
-            # test = test.isel(x=slice(30, None), y=slice(None, 22))
             train = train.isel(x=slice(-32, None), y=slice(None, 32))
             test = test.isel(x=slice(-32, None), y=slice(None, 32))
             
         unscaled_sic_train, unscaled_sic_test = train.ceda_sic.values, test.ceda_sic.values
 
-        # Deseasonalize, if desired
+        # Deseasonalize by removing climatologies (calculated using the entire training dataset)
         if deseasonalize:
             climatologies = train.groupby('time.dayofyear').mean()
             train = train.groupby('time.dayofyear') - climatologies
             test = test.groupby('time.dayofyear') - climatologies
 
-        # Transform into np.array
+        # Convert into np.array
         train_array, test_array = train.to_array().to_numpy(), test.to_array().to_numpy()
 
-        # Apply (pseudo-)landmask
+        # Apply (pseudo-)landmask using the NaNs in the first SIC frame
         self.nan_mask = np.isnan(train_array[0][0])
 
-        # Scaling
+        # Normalization
         self.scaler = StandardScaler()
         train_array = self.scaler.fit_transform(train_array.reshape(-1, np.prod(train_array.shape[1:])).T).T.reshape(train_array.shape)
         test_array = self.scaler.transform(test_array.reshape(-1, np.prod(test_array.shape[1:])).T).T.reshape(test_array.shape)
-
+        
+        # Use a 85% threshold to convert to binary sea ice on/off (85 chosen as per extent.ipynb)
         if binary_sic:
             train_array[0] = apply_tresh(unscaled_sic_train, 85).astype(int)
             test_array[0] = apply_tresh(unscaled_sic_test, 85).astype(int)
                 
         # Replace NaNs with 0s 
         train_array, test_array = np.nan_to_num(train_array), np.nan_to_num(test_array)
-
+        
+        # Create timesteps 
+        # This creates (num_timesteps + gap + num_timesteps_predict) timesteps, which is then decomposed
+        # Note that this is inefficient and should be revisited (TODO)
         train_X = np.transpose(train_array, axes=[1, 2, 3, 0])
         train_X = create_timesteps(train_X, num_timesteps + gap + num_timesteps_predict)
         train_X = np.transpose(train_X, axes=[1, 0, 2, 3, 4])
@@ -209,19 +215,22 @@ class ModelTester:
         # Split x and y
         train_Y = train_X[:, -(num_timesteps_predict):, :, :, :]
         test_Y = test_X[:, -(num_timesteps_predict):, :, :, :]
-
+        
+        # To predict anomalies, we remove the previous timestep (and repeat the first timestep to keep the dimensions the same)
         if predict_anomalies:
             train_Y = train_Y[1:] - train_Y[:-1]
             train_Y = np.array([train_Y[0]] + list(train_Y))
             test_Y = test_Y[1:] - test_Y[:-1]
             test_Y = np.array([test_Y[0]] + list(test_Y))
-
+        
+        # Keep only num_timesteps, rather than (num_timesteps + gap + num_timesteps_predict)
         train_X = train_X[:, :num_timesteps, :, :, :]
         test_X = test_X[:, :num_timesteps, :, :, :]
 
         dates_train = train.time[num_timesteps + gap:]
         dates_test = test.time[num_timesteps + gap:]
-
+        
+        # If only predicting SIC, keep only first variable (SIC) but expand to keep the same num. of dimensions
         if predict_only_sic:
             train_Y = np.expand_dims(train_Y[..., 0], -1)
             test_Y = np.expand_dims(test_Y[..., 0], -1)
@@ -248,10 +257,14 @@ class ModelTester:
                      conv_filters=[128, 64, 64],
                      conv_kernels=[(5, 5), (3, 3), (1, 1)],
                      ):
+        """
+        Creates the model architecture given the inputs & saves the model as a class attribute.
+        """
         
         assert num_convlstm == len(convlstm_filters) == len(convlstm_kernels)
         assert num_conv == len(conv_filters) == len(conv_kernels)
-
+        
+        # Save model hyperparams, without self and the loss function since it causes issues when pickling (hacky!)
         self.model_params = locals()
         del self.model_params['self']
         del self.model_params['loss']
@@ -318,7 +331,6 @@ class ModelTester:
         early_stopping = keras.callbacks.EarlyStopping(monitor="val_loss", patience=10)
         reduce_lr = keras.callbacks.ReduceLROnPlateau(monitor="val_loss", patience=5)
 
-        # Train
         history = model.fit(
             self.train_X,
             self.train_Y,
@@ -336,6 +348,9 @@ class ModelTester:
         return df
 
     def get_results(self, invert=True):
+        """
+        Get RMSE and MAE on the test set for the model & two baselines. 
+        """
 
         nan_mask_reshaped = np.expand_dims(~self.nan_mask, [0, -1])
         df = pd.DataFrame(index=['Train MAE', 'Train RMSE', 'Test MAE', 'Test RMSE'])
@@ -381,6 +396,9 @@ class ModelTester:
         return df
 
     def inverse_sic(self, arr, anomalies=True):
+        """
+        Invert the SIC transformations to get SIC values
+        """
         if self.predict_anomalies & anomalies:
             arr = arr[1:] + arr[:-1]
             arr = np.array([arr[0]] + list(arr))
@@ -390,6 +408,9 @@ class ModelTester:
         return inversed.transpose([4, 1, 2, 3, 0])[..., 0:1]
 
     def save(self, model_name, save_dir):
+        """
+        Save object as pickle and model using the keras save() function since pickle cannot handle the keras model.
+        """
         filename = save_dir + model_name
 
         # Save model separately 
@@ -416,6 +437,9 @@ class ModelTester:
             pickle.dump(obj, f)
 
     def load(self, model_name, save_dir, load_model=False):
+        """
+        Load a previously saved ModelTester object.
+        """
         filename = save_dir + model_name
 
         # Load object without model
@@ -428,6 +452,9 @@ class ModelTester:
                                                 custom_objects={'loss': loss})
     
     def plot_examples(self, num_frames, i_start=0, set_='test', diff_from=None):
+        """
+        Plot example predictions for the model and baseline models.
+        """
         X = self.train_X if set_ == 'train' else self.test_X
         y = self.train_Y if set_ == 'train' else self.test_Y
 
